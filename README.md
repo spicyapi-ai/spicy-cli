@@ -1,8 +1,8 @@
 # @spicyapi/cli
 
 The official command-line client for [SpicyAPI](https://spicyapi.ai). `spicyapi` lets you browse the
-models your account can use, check a price, generate images and videos, wait for them and download
-the results — by typing commands in a terminal, without writing any code.
+models your account can use, check a price, generate images, videos and audio, wait for them and
+download the results — by typing commands in a terminal, without writing any code.
 
 It is useful when you want to try models and prices before anyone writes an integration, generate
 media from your own computer, or check a model's exact settings before building on top of it.
@@ -22,13 +22,13 @@ the MCP server or the Agent Skill. The full, step-by-step guide lives at
 | Check my balance                                      | `spicyapi balance`                      | No           | Yes                           |
 | See how much the current key has spent                | `spicyapi usage`                        | No           | Yes                           |
 | Get the exact price of a generation without starting  | `spicyapi tasks quote`                  | No           | Yes                           |
-| Start an image or video generation                    | `spicyapi tasks create`                 | **Yes**      | Yes                           |
+| Start an image, video or audio generation             | `spicyapi tasks create`                 | **Yes**      | Yes                           |
 | Wait for a generation to finish                       | `spicyapi tasks wait <task-id>`         | No           | Yes                           |
 | Look at one generation and its result links           | `spicyapi tasks get <task-id>`          | No           | Yes                           |
 | List my recent generations                            | `spicyapi tasks list`                   | No           | Yes                           |
 | Run a failed or expired generation again              | `spicyapi tasks retry <task-id>`        | **Yes**      | Yes                           |
 | Permanently delete a finished generation's content    | `spicyapi tasks purge <task-id>`        | No refund    | Yes                           |
-| Upload a picture, video or audio file to use as input | `spicyapi files upload <path>`          | No           | Yes                           |
+| Upload a picture, video, audio or a document as input | `spicyapi files upload <path>`          | No           | Yes                           |
 | Get a fresh download link for a result                | `spicyapi files download-url <task-id>` | No           | Yes                           |
 | Check that a callback really came from SpicyAPI       | `spicyapi webhooks verify`              | No           | No (uses your webhook secret) |
 
@@ -145,7 +145,7 @@ Choose an item whose `enabled` and `available` are both `true`. IDs read `<maker
 The live catalog decides what your account can call today, so use an ID from this list rather than
 one you remember. The commands below write `MODEL_ID_FROM_CATALOG` where that ID goes: it is a
 placeholder, not a model, so paste your own ID in its place. `pricing` shows your price per `unit`
-(`per_image`, `per_second`, `per_request` or `per_1k_tokens`).
+(`per_image`, `per_second`, `per_request`, `per_1k_tokens` or `per_1k_characters`).
 
 **4. Read that model's exact settings** — never guess the fields:
 
@@ -395,10 +395,12 @@ Use `tasks get` for a result you actually selected, rather than expanding every 
 | `files download-url <task-id>` | Short-lived URL for a task output                   |
 | `webhooks verify`              | Verify a callback signature against exact raw bytes |
 
-`files upload` accepts JPEG, PNG, WebP and GIF images up to 10 MiB, and MP4, WebM, MP3 and WAV up to
-90 MiB and 600 seconds; the type comes from the file extension, or from `--content-type`. It prints
-a `spicy://` `uri` to put in a model input field such as `image_url`. The URI is usable until
-`expiresAt`, normally one day.
+`files upload` accepts JPEG, PNG, WebP and GIF images up to 10 MiB; MP4, WebM, MP3 and WAV up to
+90 MiB and 600 seconds; and reference documents up to 90 MiB — PDF, Word (`doc`, `docx`), Excel
+(`xls`, `xlsx`), PowerPoint (`ppt`, `pptx`), Keynote, Pages, Numbers, plain text and Markdown —
+for fields such as `reference_file_url`. The type comes from the file extension, or from
+`--content-type`. It prints a `spicy://` `uri` to put in a model input field such as `image_url`.
+The URI is usable until `expiresAt`, normally one day.
 
 `files download-url` takes `--key <key>` to pick one output (the first one by default). The link
 lasts about 20 minutes; the command prints it and does not save the file.
@@ -537,7 +539,7 @@ first, give each logical generation its own fixed `--idempotency-key`, read `sta
 | `request exceeded the local 30000ms timeout`                                    | Check the network; allow more with `--timeout-ms 120000`                                                                        |
 | `did not reach a terminal state within 600000ms`                                | Not a failure: `spicyapi tasks wait <task-id> --wait-timeout-ms 1800000`                                                        |
 | `No documentation matched "…"`                                                  | `docs search` found nothing; try fewer or different words                                                                       |
-| `contentType is required unless the file extension is …`                        | Pass `--content-type`, or convert to a supported file type                                                                      |
+| `--content-type is required unless the file extension is …`                     | Pass `--content-type`, or convert to a supported file type                                                                      |
 | 5xx                                                                             | Retry later; if it persists, quote the request id at [spicyapi.ai/contact](https://spicyapi.ai/contact)                         |
 
 ## What this CLI does not do
@@ -549,6 +551,11 @@ text models are reached through the compatible layers instead — `POST /v1/chat
 so keep the official client you already use and point its base URL at SpicyAPI. Use native
 `jobs/stream` when you need quote confirmation and the platform event envelope — see the
 [text and streaming guide](https://docs.spicyapi.ai/docs/text-and-streaming).
+
+Text models that read images, video or audio take them as message parts, and
+`spicyapi files upload` returns the `spicy://f/…` URI that goes in an `image_url`, `video_url` or
+`audio_url` part (video and audio parts are carried by Chat Completions and `jobs/stream`) — see
+[sending media to a text model](https://docs.spicyapi.ai/docs/text-and-streaming#media-input).
 
 An accepted task cannot be canceled. `tasks purge` destroys a finished task's content, but the task
 record and its charge remain.

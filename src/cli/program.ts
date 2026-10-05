@@ -19,6 +19,7 @@ import {
   describeNextStep,
   describeServiceStatus,
   describeTaskRetention,
+  inferUploadContentType,
   isMissingApiKeyError,
   outputValue,
   parseRetentionSeconds,
@@ -26,6 +27,7 @@ import {
   readInputObject,
   requireConfirmation,
   type CliIo,
+  type CliUploadContentType,
 } from "./io.js";
 
 interface GlobalOptions {
@@ -515,12 +517,20 @@ export function createCli(dependencies: CliDependencies = {}): Command {
     .description("upload inputs and create short-lived output links");
   files
     .command("upload")
-    .argument("<path>", "image (JPEG/PNG/WebP/GIF), video (MP4/WebM), or audio (MP3/WAV) file")
+    .argument(
+      "<path>",
+      "image (JPEG/PNG/WebP/GIF), video (MP4/WebM), audio (MP3/WAV), or reference document (PDF, Word, Excel, PowerPoint, Keynote, Pages, Numbers, TXT, Markdown)",
+    )
     .option("--content-type <type>", "override MIME type", parseUploadContentType)
     .description("upload a local file and print its spicy:// URI for use in model input")
-    .action(async (filePath: string, options: { contentType?: UploadContentType }) => {
+    .action(async (filePath: string, options: { contentType?: CliUploadContentType }) => {
+      const contentType = options.contentType ?? inferUploadContentType(filePath);
       outputValue(
-        await createClient(clientOptions(program)).uploadFile(filePath, options),
+        await createClient(clientOptions(program)).uploadFile(filePath, {
+          /* The published SDK types stop at the eight media types; documents are passed through
+             unchanged at runtime and validated by the server. See DocumentContentType. */
+          contentType: contentType as UploadContentType,
+        }),
         isJson(program),
         io,
       );

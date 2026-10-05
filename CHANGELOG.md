@@ -1,5 +1,27 @@
 # @spicyapi/cli
 
+## 0.6.0
+
+### Minor Changes
+
+- `files upload` takes reference documents: PDF, Word (`doc`, `docx`), Excel (`xls`, `xlsx`),
+  PowerPoint (`ppt`, `pptx`), Keynote, Pages, Numbers, plain text and Markdown, up to 90 MiB, for
+  input fields such as `reference_file_url`. The service has accepted them since late September,
+  but the CLI only knew eight media types, so `files upload brief.pdf` stopped locally with a list
+  of image, video and audio extensions. The type comes from the extension as before, and
+  `--content-type` accepts the twelve document types too. An unrecognised extension is now refused
+  before any request, with a message that lists every extension the CLI understands.
+
+### Patch Changes
+
+- The `Next:` line after a 403 depends on the business code. It used to tell every refusal to check
+  the key's model and IP allowlists, which sent an account with an unverified email (`40310`) or a
+  request from an unserved region (`40303`) to a settings page with nothing wrong on it. A 403
+  without any SpicyAPI code now points at the proxy, VPN or gateway that answered instead.
+- README: list `per_1k_characters` among the price units, mention audio generation, and note that
+  a `spicy://f/…` URI from `files upload` is what goes in a text model's `image_url`, `video_url`
+  or `audio_url` message part on the compatible endpoints.
+
 ## 0.5.7
 
 ### Patch Changes

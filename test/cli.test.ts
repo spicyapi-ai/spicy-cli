@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCli, type CliDependencies } from "../src/cli/index.js";
-import type { CliIo } from "../src/cli/io.js";
-import { SpicyClient } from "@spicyapi/sdk";
+import { SUPPORTED_UPLOAD_CONTENT_TYPES, type CliIo } from "../src/cli/io.js";
+import { readOpenApiContract, SpicyClient } from "@spicyapi/sdk";
 
 interface CapturedIo {
   io: CliIo;
@@ -1030,4 +1030,216 @@ void test("docs search says so when nothing matches, still exits 0, and still pr
     0,
   );
   assert.deepEqual(JSON.parse(json.stdout.join("")), []);
+});
+
+// -- Reference documents and 403 business codes, 2026-10-05 -------------------------------------
+
+/** A fake upload backend: sign the ticket, accept the PUT, commit - recording what was declared. */
+function uploadBackend(seen: { ticket?: Record<string, unknown>; put?: boolean }): typeof fetch {
+  return (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith("/common/upload-url")) {
+      seen.ticket = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Promise.resolve(
+        Response.json({
+          code: 200,
+          msg: "success",
+          request_id: "req_ticket",
+          data: {
+            fileId: "fil_doc",
+            key: "spicy://f/fil_doc",
+            uploadUrl: "http://127.0.0.1:4020/upload/fil_doc",
+            method: "PUT",
+            headers: { "Content-Type": String(seen.ticket["contentType"]) },
+            expiresAt: "2026-10-05T00:20:00Z",
+            maxBytes: 90 * 1024 * 1024,
+          },
+        }),
+      );
+    }
+    if (url.endsWith("/upload/fil_doc")) {
+      seen.put = true;
+      return Promise.resolve(new Response("", { status: 200 }));
+    }
+    if (url.endsWith("/files/fil_doc/commit")) {
+      return Promise.resolve(
+        Response.json({
+          code: 200,
+          msg: "success",
+          request_id: "req_commit",
+          data: {
+            fileId: "fil_doc",
+            status: "ready",
+            bytes: 9,
+            contentType: seen.ticket?.["contentType"],
+            sha256: "a".repeat(64),
+            uri: "spicy://f/fil_doc",
+            expiresAt: "2026-10-06T00:00:00Z",
+          },
+        }),
+      );
+    }
+    return Promise.resolve(Response.json({ code: 500, msg: "unexpected" }, { status: 500 }));
+  };
+}
+
+void test("files upload takes reference documents, naming their type itself because the SDK cannot", async () => {
+  // The server has accepted PDF, Office, iWork, TXT and Markdown uploads since 2026-09-29 (for
+  // fields such as reference_file_url), while the published SDK infers only eight media types from
+  // an extension. Before this, `files upload brief.pdf` failed locally with a list of image, video
+  // and audio extensions - which reads as "the platform does not take documents".
+  const directory = await mkdtemp(join(tmpdir(), "spicy-cli-upload-"));
+  try {
+    const cases: Array<[string, string]> = [
+      ["brief.PDF", "application/pdf"],
+      ["deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+      ["notes.md", "text/markdown"],
+      ["frame.jpg", "image/jpeg"],
+    ];
+    for (const [name, expected] of cases) {
+      const filePath = join(directory, name);
+      await writeFile(filePath, "%PDF-1.7\n");
+      const captured = captureIo();
+      const seen: { ticket?: Record<string, unknown>; put?: boolean } = {};
+      const code = await runCli(
+        ["node", "spicyapi", "--json", "files", "upload", filePath],
+        dependencies(captured.io, uploadBackend(seen)),
+      );
+      assert.equal(code, 0, `${name}: ${captured.stderr.join("")}`);
+      assert.equal(seen.ticket?.["contentType"], expected, `${name} was declared with the wrong type`);
+      assert.equal(seen.put, true, `${name}: the bytes must genuinely be PUT`);
+      const result = JSON.parse(captured.stdout.join("")) as { uri: string; contentType: string };
+      assert.equal(result.uri, "spicy://f/fil_doc");
+      assert.equal(result.contentType, expected);
+    }
+
+    // An explicit --content-type is accepted for documents too, and wins over the extension.
+    const explicit = captureIo();
+    const seen: { ticket?: Record<string, unknown> } = {};
+    const filePath = join(directory, "export.bin");
+    await writeFile(filePath, "plain words");
+    assert.equal(
+      await runCli(
+        ["node", "spicyapi", "--json", "files", "upload", filePath, "--content-type", "text/plain"],
+        dependencies(explicit.io, uploadBackend(seen)),
+      ),
+      0,
+    );
+    assert.equal(seen.ticket?.["contentType"], "text/plain");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("an unknown extension is refused before any request, and the message lists documents too", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "spicy-cli-upload-"));
+  try {
+    const filePath = join(directory, "clip.xyz");
+    await writeFile(filePath, "bytes");
+    const captured = captureIo();
+    let requests = 0;
+    const code = await runCli(
+      ["node", "spicyapi", "files", "upload", filePath],
+      dependencies(captured.io, () => {
+        requests += 1;
+        return Promise.resolve(Response.json({ code: 500, msg: "unexpected" }, { status: 500 }));
+      }),
+    );
+    assert.equal(code, 1);
+    assert.equal(requests, 0, "no ticket may be requested for a file whose type is unknown");
+    const stderr = captured.stderr.join("");
+    assert.match(stderr, /--content-type is required unless the file extension is one of: /);
+    for (const extension of ["jpg", "mp4", "mp3", "pdf", "docx", "md"]) {
+      assert.match(stderr, new RegExp(`\\b${extension}\\b`), `${extension} is missing from the list`);
+    }
+
+    const invalid = captureIo();
+    assert.notEqual(
+      await runCli(
+        ["node", "spicyapi", "files", "upload", filePath, "--content-type", "application/zip"],
+        dependencies(invalid.io, () => Promise.reject(new Error("must not be called"))),
+      ),
+      0,
+    );
+    assert.match(invalid.stderr.join(""), /application\/pdf/, "the accepted list must name documents");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+void test("each 403 business code gets its own next step, and none of them is the allowlist one by mistake", async () => {
+  // Every 403 used to read "check the key's model and IP allowlists". An account whose email is not
+  // verified yet (40310) or a request from a region the service is not offered in (40303) was sent
+  // to a settings page with nothing wrong on it.
+  const forbidden = (body: unknown, contentType = "application/json"): typeof fetch => {
+    return () =>
+      Promise.resolve(
+        new Response(typeof body === "string" ? body : JSON.stringify(body), {
+          status: 403,
+          headers: { "Content-Type": contentType },
+        }),
+      );
+  };
+  const cases: Array<[string, typeof fetch, RegExp]> = [
+    [
+      "40310",
+      forbidden({ code: 40310, msg: "Verify your email address", request_id: "req_1" }),
+      /Next: verify your account email first/,
+    ],
+    [
+      "40303",
+      forbidden({ code: 40303, msg: "Not available", request_id: "req_2" }),
+      /Next: SpicyAPI is not offered in the region this request came from/,
+    ],
+    [
+      "40301",
+      forbidden({ code: 40301, msg: "Model not allowed", request_id: "req_3" }),
+      /Next: this key may not call this model/,
+    ],
+    [
+      "40302",
+      forbidden({ code: 40302, msg: "IP not allowed", request_id: "req_4" }),
+      /Next: this network address is not on the key's IP allowlist/,
+    ],
+    [
+      "403",
+      forbidden({ code: 403, msg: "Forbidden", request_id: "req_5" }),
+      /Next: this key is not allowed to do that/,
+    ],
+    [
+      "gateway",
+      forbidden("<html><body>Access denied by corporate proxy</body></html>", "text/html"),
+      /Next: this refusal carries no SpicyAPI error code/,
+    ],
+  ];
+  for (const [label, mockFetch, expected] of cases) {
+    const captured = captureIo({ env: { SPICY_API_KEY: "sk-spicy-test" } });
+    const code = await runCli(
+      ["node", "spicyapi", "models", "list"],
+      dependencies(captured.io, mockFetch),
+    );
+    assert.equal(code, 1, label);
+    const stderr = captured.stderr.join("");
+    assert.match(stderr, expected, `${label}: ${stderr}`);
+    if (label !== "403" && label !== "40301" && label !== "40302") {
+      assert.equal(stderr.includes("allowlist"), false, `${label} pointed at the key allowlists`);
+    }
+  }
+});
+
+void test("the CLI accepts every upload type the bundled contract lists", async () => {
+  // The upload list has fallen behind the service twice (audio and video, then documents), each
+  // time looking like "the platform does not take this". The bundled contract arrives with each SDK
+  // release, so this goes red on the first SDK upgrade that adds a type the CLI does not know.
+  const contract = await readOpenApiContract();
+  const block = /UploadURLRequest:[\s\S]*?contentType: \{[^}]*enum: \[([^\]]+)\]/.exec(contract);
+  assert.ok(block?.[1], "UploadURLRequest.contentType enum not found in the bundled contract");
+  const listed = block[1].split(",").map((value) => value.trim());
+  assert.ok(listed.includes("image/png"), "the parsed enum is not the upload one");
+  for (const contentType of listed) {
+    assert.ok(
+      (SUPPORTED_UPLOAD_CONTENT_TYPES as readonly string[]).includes(contentType),
+      `the contract accepts ${contentType} but the CLI refuses it`,
+    );
+  }
 });

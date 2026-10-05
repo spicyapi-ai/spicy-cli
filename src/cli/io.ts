@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { SpicyApiError } from "@spicyapi/sdk";
@@ -144,6 +145,33 @@ function describeApiKeyState(env: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * A 403 has four unrelated causes, and the business code is the only thing that tells them apart.
+ *
+ * This used to answer every 403 with "check the key's model and IP allowlists". For an account whose
+ * email is not verified yet (`40310`) or a request from a region the service is not offered in
+ * (`40303`), that sends people to a settings page where nothing is wrong. A 403 without any business
+ * code almost certainly did not come from SpicyAPI: the SDK only fills `code` from the platform's
+ * own envelope, which always carries one, so an empty one means a proxy, VPN or gateway answered
+ * first, and the allowlists are just as irrelevant.
+ */
+function describeForbidden(code: number | undefined): string {
+  switch (code) {
+    case 40301:
+      return "Next: this key may not call this model. Check the key's model restrictions at https://spicyapi.ai/console/keys.";
+    case 40302:
+      return "Next: this network address is not on the key's IP allowlist. Add it, or use a key without one, at https://spicyapi.ai/console/keys.";
+    case 40303:
+      return "Next: SpicyAPI is not offered in the region this request came from. Changing keys or settings does not change that.";
+    case 40310:
+      return "Next: verify your account email first. Open the link we sent when you signed up, or send a new one from https://spicyapi.ai/console; the key works as soon as the address is verified.";
+    case undefined:
+      return "Next: this refusal carries no SpicyAPI error code, so something in between most likely answered. Check any proxy, VPN or corporate gateway between this machine and api.spicyapi.ai.";
+    default:
+      return "Next: this key is not allowed to do that. Check its model allowlist and IP allowlist at https://spicyapi.ai/console/keys.";
+  }
+}
+
+/**
  * With no key, the SDK throws a plain TypeError (`SPICY_API_KEY is required for authenticated API
  * operations`) before any request goes out.
  *
@@ -179,7 +207,7 @@ export function describeNextStep(error: unknown, env: NodeJS.ProcessEnv): string
     case 402:
       return "Next: top up, or raise the key's spend cap, at https://spicyapi.ai/console. Asking again does not change a balance or a cap.";
     case 403:
-      return "Next: this key is not allowed to do that. Check its model allowlist and IP allowlist at https://spicyapi.ai/console/keys.";
+      return describeForbidden(error.code);
     case 404:
       return "Next: check the id. Model ids read <maker>/<model>/<task>; `spicyapi models list` shows what this account can call today.";
     case 409:
@@ -336,24 +364,89 @@ export function describeTaskRetention(task: TaskRecord): string[] {
   return lines;
 }
 
-export function parseUploadContentType(value: string): UploadContentType {
-  /* Must match the `UploadURLRequest.contentType` enum in the contract value for value. Before
-     2026-09-12 this listed four image types while the server and the SDK had long accepted audio
-     and video - so anyone uploading an mp4 with an explicit MIME type was stopped by the CLI
-     itself, with a message reading "content type must be one of: <four image types>", which looks
-     like the platform not supporting video. */
-  const supported: UploadContentType[] = [
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/gif",
-    "video/mp4",
-    "video/webm",
-    "audio/mpeg",
-    "audio/wav",
-  ];
-  if (!supported.includes(value as UploadContentType)) {
-    throw new TypeError(`content type must be one of: ${supported.join(", ")}`);
+/**
+ * Reference documents the upload endpoint accepts on top of images, audio and video (up to 90 MiB),
+ * for input fields such as `reference_file_url`.
+ *
+ * They are listed here rather than taken from the SDK because the published SDK's
+ * `UploadContentType` and its extension table still stop at the eight media types, while the
+ * server has accepted documents since 2026-09-29. At runtime the SDK forwards whatever content type
+ * it is given, so the CLI only has to name the type itself; once the SDK lists documents too, this
+ * union simply overlaps with it.
+ */
+export type DocumentContentType =
+  | "application/pdf"
+  | "application/msword"
+  | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  | "application/vnd.ms-excel"
+  | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  | "application/vnd.ms-powerpoint"
+  | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  | "application/vnd.apple.keynote"
+  | "application/vnd.apple.pages"
+  | "application/vnd.apple.numbers"
+  | "text/plain"
+  | "text/markdown";
+
+export type CliUploadContentType = UploadContentType | DocumentContentType;
+
+/* Must cover the `UploadURLRequest.contentType` enum in the contract value for value. Before
+   2026-09-12 the CLI listed four image types while the server and the SDK had long accepted audio
+   and video - so anyone uploading an mp4 with an explicit MIME type was stopped by the CLI itself,
+   with a message reading "content type must be one of: <four image types>", which looks like the
+   platform not supporting video. The same thing happened again with documents, which is why the
+   extension table and the accepted types now live side by side in one place. */
+const UPLOAD_CONTENT_TYPES_BY_EXTENSION: Readonly<Record<string, CliUploadContentType>> = {
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".key": "application/vnd.apple.keynote",
+  ".pages": "application/vnd.apple.pages",
+  ".numbers": "application/vnd.apple.numbers",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+};
+
+export const SUPPORTED_UPLOAD_CONTENT_TYPES: readonly CliUploadContentType[] = [
+  ...new Set(Object.values(UPLOAD_CONTENT_TYPES_BY_EXTENSION)),
+];
+
+/**
+ * The content type for `files upload`, taken from the file extension (case-insensitive).
+ *
+ * The error lists the extensions this table knows, so it can never name fewer types than the CLI
+ * actually accepts - the SDK's own message would list only its eight media types.
+ */
+export function inferUploadContentType(filePath: string): CliUploadContentType {
+  const contentType = UPLOAD_CONTENT_TYPES_BY_EXTENSION[extname(filePath).toLowerCase()];
+  if (!contentType) {
+    const known = Object.keys(UPLOAD_CONTENT_TYPES_BY_EXTENSION)
+      .map((extension) => extension.slice(1))
+      .join(", ");
+    throw new TypeError(`--content-type is required unless the file extension is one of: ${known}`);
   }
-  return value as UploadContentType;
+  return contentType;
+}
+
+export function parseUploadContentType(value: string): CliUploadContentType {
+  if (!SUPPORTED_UPLOAD_CONTENT_TYPES.includes(value as CliUploadContentType)) {
+    throw new TypeError(
+      `content type must be one of: ${SUPPORTED_UPLOAD_CONTENT_TYPES.join(", ")}`,
+    );
+  }
+  return value as CliUploadContentType;
 }
