@@ -34,7 +34,12 @@ void test("does not relaunch when it would change nothing or break the start", (
     ["already on", { HTTPS_PROXY: PROXY, NODE_USE_ENV_PROXY: "1" }, [], SUPPORTED],
     ["opted out", { HTTPS_PROXY: PROXY, NODE_USE_ENV_PROXY: "0" }, [], SUPPORTED],
     ["flag in execArgv", { HTTPS_PROXY: PROXY }, ["--use-env-proxy"], SUPPORTED],
-    ["flag in NODE_OPTIONS", { HTTPS_PROXY: PROXY, NODE_OPTIONS: "--use-env-proxy" }, [], SUPPORTED],
+    [
+      "flag in NODE_OPTIONS",
+      { HTTPS_PROXY: PROXY, NODE_OPTIONS: "--use-env-proxy" },
+      [],
+      SUPPORTED,
+    ],
     ["runtime too old", { HTTPS_PROXY: PROXY }, [], "22.20.0"],
   ];
   for (const [name, env, execArgv, version] of cases) {

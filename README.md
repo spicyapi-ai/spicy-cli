@@ -30,6 +30,9 @@ the MCP server or the Agent Skill. The full, step-by-step guide lives at
 | Permanently delete a finished generation's content    | `spicyapi tasks purge <task-id>`        | No refund    | Yes                           |
 | Upload a picture, video, audio or a document as input | `spicyapi files upload <path>`          | No           | Yes                           |
 | Get a fresh download link for a result                | `spicyapi files download-url <task-id>` | No           | Yes                           |
+| Keep a file in my asset library to reuse later        | `spicyapi assets save`                  | No           | Yes                           |
+| See, rename or delete my saved assets                 | `spicyapi assets list`                  | No           | Yes                           |
+| See my characters and their image references          | `spicyapi characters list`              | No           | Yes                           |
 | Check that a callback really came from SpicyAPI       | `spicyapi webhooks verify`              | No           | No (uses your webhook secret) |
 
 Only `tasks create` and `tasks retry` spend money, and both stop and ask before anything is charged.
@@ -238,8 +241,8 @@ Every command has built-in help: `spicyapi <command> --help`.
 | `SPICY_API_BASE_URL`, `SPICY_SERVICE_BASE_URL` | Optional address overrides; HTTPS only (plain HTTP is allowed for loopback) |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`        | Send requests through an HTTP(S) proxy, the same variables curl reads       |
 
-Proxy variables work on Node.js 22.21+ or 24+. Node.js's built-in `fetch` ignores them unless it
-was started with `NODE_USE_ENV_PROXY=1`, so when the CLI finds an `http://` or `https://` proxy it
+Proxy variables work on Node.js 22.21+ or 24+. Node.js's built-in `fetch` ignores them unless it was
+started with `NODE_USE_ENV_PROXY=1`, so when the CLI finds an `http://` or `https://` proxy it
 restarts itself once with that switch on. Set `NODE_USE_ENV_PROXY=0` to always connect directly.
 `socks5://` proxies are not supported.
 
@@ -395,12 +398,12 @@ Use `tasks get` for a result you actually selected, rather than expanding every 
 | `files download-url <task-id>` | Short-lived URL for a task output                   |
 | `webhooks verify`              | Verify a callback signature against exact raw bytes |
 
-`files upload` accepts JPEG, PNG, WebP and GIF images up to 10 MiB; MP4, WebM, MP3 and WAV up to
-90 MiB and 600 seconds; and reference documents up to 90 MiB — PDF, Word (`doc`, `docx`), Excel
-(`xls`, `xlsx`), PowerPoint (`ppt`, `pptx`), Keynote, Pages, Numbers, plain text and Markdown —
-for fields such as `reference_file_url`. The type comes from the file extension, or from
-`--content-type`. It prints a `spicy://` `uri` to put in a model input field such as `image_url`.
-The URI is usable until `expiresAt`, normally one day.
+`files upload` accepts JPEG, PNG, WebP and GIF images up to 10 MiB; MP4, WebM, MP3 and WAV up to 90
+MiB and 600 seconds; and reference documents up to 90 MiB — PDF, Word (`doc`, `docx`), Excel (`xls`,
+`xlsx`), PowerPoint (`ppt`, `pptx`), Keynote, Pages, Numbers, plain text and Markdown — for fields
+such as `reference_file_url`; and LoRA weights (`.safetensors`, up to 2 GiB) for `loras[].path`. The
+type comes from the file extension, or from `--content-type`. It prints a `spicy://` `uri` to put in
+a model input field such as `image_url`. The URI is usable until `expiresAt`, normally one day.
 
 `files download-url` takes `--key <key>` to pick one output (the first one by default). The link
 lasts about 20 minutes; the command prints it and does not save the file.
@@ -409,6 +412,79 @@ lasts about 20 minutes; the command prints it and does not save the file.
 `--payload-version` (`1` or `2`) from the callback headers, and accepts `--tolerance-seconds`
 (default 300). It reads the secret from an environment variable named by `--secret-env`
 (`SPICY_WEBHOOK_SECRET` by default). The secret itself is never accepted as an argument.
+
+### Asset library
+
+An upload lasts one day. To reuse a file across generations — a character portrait, a style
+reference, a voice sample — save it to your asset library. Each asset gets a `spicy://a/<id>`
+reference that works in any media field of model inputs sent with keys of the same workspace, until
+it is deleted.
+
+The key in `SPICY_API_KEY` decides the library: a personal key reaches your personal library, and a
+team key reaches that team's shared library (never anyone's personal one). With a team key, the
+creator's current role decides what may change: owner and admin anything, developer saves and
+renames, favorites or deletes only what they saved, billing and readonly only read and use.
+`assets usage` prints which library the key reaches and with which role.
+
+| Command                                    | What it does                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `assets save --task <task-id> [--index n]` | Save one output of a successful task (first output by default)      |
+| `assets save --file <path>`                | Upload a local file and save it; `--name` defaults to the file name |
+| `assets save --url <url>`                  | Save a public `http`/`https` file                                   |
+| `assets save --file-id <id>`               | Save a committed upload (`fil_…` or `spicy://f/…`)                  |
+| `assets list`                              | Newest first; `--kind`, `--source`, `--search`, `--limit`, `--all`  |
+| `assets list --favorite` / `--no-favorite` | Only favorites, or only the rest                                    |
+| `assets list --folder <collection-id>`     | Only one folder; folders are made on the Assets page of the web app |
+| `assets list --sort <order>`               | `recent` (default), `oldest`, `name` or `size`                      |
+| `assets get <asset>`                       | One asset with a private preview link (at most 20 minutes)          |
+| `assets rename <asset> <name>`             | Change the name; the reference stays the same                       |
+| `assets favorite <asset>` / `unfavorite`   | Mark or unmark a favorite; a team sees the same favorites           |
+| `assets delete <asset>`                    | Delete for good; asks first, or pass `--yes`                        |
+| `assets usage`                             | Which library and role, the plan, what is stored, today's count     |
+
+```bash
+# Keep the first output of a finished task (find its id with `spicyapi tasks list`), then reuse it.
+uri=$(spicyapi --json assets save --task job_... --name "Hero portrait" | jq -r .uri)
+spicyapi tasks create --model MODEL_ID_FROM_CATALOG \
+  --input-json "{\"image_url\": \"$uri\", \"prompt\": \"slow push-in\"}"
+```
+
+`<asset>` is the `ast_…` id or the whole `spicy://a/…` reference. `save` adds the required
+`Idempotency-Key` itself; pass `--idempotency-key` to replay one save after an uncertain response.
+Saving the same task output, upload or URL again returns the asset you already have. Take the model
+ID from `spicyapi models list` and the field name from `spicyapi models get <model>`.
+
+`--cursor` only works with the `--sort` it came from; with another one the server answers `400`.
+`--all` keeps your filters and sort on every page. An unknown folder id is a `404`. See
+[favorites and folders](https://docs.spicyapi.ai/docs/media#asset-library-organize).
+
+Storage unlocks with the owner's lifetime top-ups; the owner's personal and team libraries share one
+allowance, and on a team key whose creator is not the owner `assets usage` leaves out the top-up
+amounts and says the team owner upgrades. When a call is refused, `--json` prints the server's
+`reason` (for example `asset_library_full`, `asset_daily_limit` or `asset_permission_denied`) and
+the readable output ends with a `Next:` line saying what to do.
+
+#### Characters
+
+A character is a named, ordered set of images from your library, created and arranged on the Assets
+page of the web app; the CLI reads them. To use one, put its images, in order, into the model's
+reference image field.
+
+| Command                   | What it does                                                         |
+| ------------------------- | -------------------------------------------------------------------- |
+| `characters list`         | Characters, newest first, each with its images as `spicy://a/` refs  |
+| `characters list --asset` | Only the characters that contain one asset; also `--limit`, `--all`  |
+| `characters get <id>`     | One character's images in order, then a `References:` array to paste |
+
+```bash
+# The image references of one character, in order, ready for --input-json.
+refs=$(spicyapi --json characters get ety_... | jq -c '[.assets[].uri]')
+```
+
+Characters used to be called personas. Existing `spicy://p/<id>` references keep working, in your
+personal library only; new requests should use the `spicy://a/` references `characters get` prints.
+`assets list --character <id>` lists one character's images as assets. See
+[characters](https://docs.spicyapi.ai/docs/media#asset-library-characters).
 
 ## Recipes
 
@@ -504,7 +580,8 @@ first, give each logical generation its own fixed `--idempotency-key`, read `sta
   this way, and each model's page states its block length. The amount you confirm is still the
   amount held, and the final charge can never exceed it.
 - **Confirmation.** `[y/N]` defaults to no. `--yes` answers for you; without a terminal and without
-  `--yes`, the CLI refuses rather than assuming yes. `tasks purge` asks the same way.
+  `--yes`, the CLI refuses rather than assuming yes. `tasks purge` and `assets delete` ask the same
+  way.
 - **Idempotency key.** A label for one logical generation. If the network drops, re-running with the
   same key returns the original task instead of creating and charging for a second one (24 hours,
   same API key). The same key with a different input is rejected.
@@ -522,7 +599,7 @@ first, give each logical generation its own fixed `--idempotency-key`, read `sta
 | `SPICY_API_KEY is required for authenticated API operations`                    | The key is not set in this terminal window; follow the `Next:` line, or open a new window after setting it permanently          |
 | `API key format is not recognized` / `Credentials are invalid or expired` (401) | Follow the `Next:` line: fix the variable's value, or create a new key                                                          |
 | `Insufficient balance` or a spend-cap message (402)                             | Add funds, or raise the key's cap; asking again does not help                                                                   |
-| 403 with `40301` / `40302`                                                      | The key's model or IP allowlist blocks this request                                                                             |
+| 403 with `40301` / `40302`                                                      | The key's model or IP allowlist blocks this request; on `assets` commands, the key's team role or workspace does not allow it   |
 | 403 with `40310`                                                                | Verify your account email: open the link we sent, or send a new one from the console                                            |
 | `Refused before reaching SpicyAPI (HTTP 403)`                                   | Something between you and the API answered instead; the message quotes what it said                                             |
 | `… is set, but this request did not use it`                                     | Your proxy variable was ignored: update Node.js to 22.21+ or 24+, or run with `NODE_USE_ENV_PROXY=1`                            |
@@ -552,9 +629,9 @@ so keep the official client you already use and point its base URL at SpicyAPI. 
 `jobs/stream` when you need quote confirmation and the platform event envelope — see the
 [text and streaming guide](https://docs.spicyapi.ai/docs/text-and-streaming).
 
-Text models that read images, video or audio take them as message parts, and
-`spicyapi files upload` returns the `spicy://f/…` URI that goes in an `image_url`, `video_url` or
-`audio_url` part (video and audio parts are carried by Chat Completions and `jobs/stream`) — see
+Text models that read images, video or audio take them as message parts, and `spicyapi files upload`
+returns the `spicy://f/…` URI that goes in an `image_url`, `video_url` or `audio_url` part (video
+and audio parts are carried by Chat Completions and `jobs/stream`) — see
 [sending media to a text model](https://docs.spicyapi.ai/docs/text-and-streaming#media-input).
 
 An accepted task cannot be canceled. `tasks purge` destroys a finished task's content, but the task

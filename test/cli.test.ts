@@ -494,7 +494,7 @@ void test("--retention accepts durations people write, as well as a plain number
   assert.equal(seen.length, 5);
 });
 
-void test("tasks get says \"it expired\" and \"you deleted it\" differently", async () => {
+void test('tasks get says "it expired" and "you deleted it" differently', async () => {
   /* `purgedAt` and `contentRemovedBy` are top-level on TaskRecord while `retention` holds the policy
      alone. Passing them separately is what preserves "the purge time is still reportable when there
      is no retention block". */
@@ -610,7 +610,11 @@ void test("a 403 is reported as a refused origin rather than an outage, and does
     );
 
     const output = captured.stdout.join("") + captured.stderr.join("");
-    assert.match(output, /refused this request/, `HTTP ${status} did not say the origin was refused`);
+    assert.match(
+      output,
+      /refused this request/,
+      `HTTP ${status} did not say the origin was refused`,
+    );
     assert.match(output, /proxy|region/, `HTTP ${status} did not say what to check`);
     assert.equal(
       output.includes("status.spicyapi.ai"),
@@ -1039,7 +1043,10 @@ function uploadBackend(seen: { ticket?: Record<string, unknown>; put?: boolean }
   return (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/common/upload-url")) {
-      seen.ticket = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      seen.ticket = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<
+        string,
+        unknown
+      >;
       return Promise.resolve(
         Response.json({
           code: 200,
@@ -1106,7 +1113,11 @@ void test("files upload takes reference documents, naming their type itself beca
         dependencies(captured.io, uploadBackend(seen)),
       );
       assert.equal(code, 0, `${name}: ${captured.stderr.join("")}`);
-      assert.equal(seen.ticket?.["contentType"], expected, `${name} was declared with the wrong type`);
+      assert.equal(
+        seen.ticket?.["contentType"],
+        expected,
+        `${name} was declared with the wrong type`,
+      );
       assert.equal(seen.put, true, `${name}: the bytes must genuinely be PUT`);
       const result = JSON.parse(captured.stdout.join("")) as { uri: string; contentType: string };
       assert.equal(result.uri, "spicy://f/fil_doc");
@@ -1150,7 +1161,11 @@ void test("an unknown extension is refused before any request, and the message l
     const stderr = captured.stderr.join("");
     assert.match(stderr, /--content-type is required unless the file extension is one of: /);
     for (const extension of ["jpg", "mp4", "mp3", "pdf", "docx", "md"]) {
-      assert.match(stderr, new RegExp(`\\b${extension}\\b`), `${extension} is missing from the list`);
+      assert.match(
+        stderr,
+        new RegExp(`\\b${extension}\\b`),
+        `${extension} is missing from the list`,
+      );
     }
 
     const invalid = captureIo();
@@ -1161,7 +1176,11 @@ void test("an unknown extension is refused before any request, and the message l
       ),
       0,
     );
-    assert.match(invalid.stderr.join(""), /application\/pdf/, "the accepted list must name documents");
+    assert.match(
+      invalid.stderr.join(""),
+      /application\/pdf/,
+      "the accepted list must name documents",
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

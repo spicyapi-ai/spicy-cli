@@ -10,13 +10,23 @@ import {
   SpicyApiError,
   SpicyClient,
   verifyWebhook,
+  type AssetKind,
+  type AssetSort,
+  type AssetSource,
+  type CreateAssetInput,
   type SpicyClientOptions,
   type ListTasksOptions,
   type UploadContentType,
 } from "@spicyapi/sdk";
 import {
   defaultCliIo,
+  describeAssetList,
+  describeAssetUsage,
+  describeCharacter,
+  describeCharacterList,
+  describeFavoriteChange,
   describeNextStep,
+  describeSavedAsset,
   describeServiceStatus,
   describeTaskRetention,
   inferUploadContentType,
@@ -71,11 +81,49 @@ interface ListModelsCommandOptions {
   includeExamples?: boolean;
 }
 
+interface ListAssetsCommandOptions {
+  kind?: AssetKind;
+  source?: AssetSource[];
+  search?: string;
+  favorite?: boolean;
+  folder?: string;
+  character?: string;
+  sort?: AssetSort;
+  cursor?: string;
+  limit?: number;
+  all?: boolean;
+}
+
+interface ListCharactersCommandOptions {
+  asset?: string;
+  cursor?: string;
+  limit?: number;
+  all?: boolean;
+}
+
+interface SaveAssetCommandOptions {
+  task?: string;
+  index?: number;
+  key?: string;
+  file?: string;
+  url?: string;
+  fileId?: string;
+  name?: string;
+  contentType?: UploadContentType;
+  idempotencyKey?: string;
+}
+
+const ASSET_KINDS: readonly AssetKind[] = ["image", "video", "audio"];
+const ASSET_SOURCES: readonly AssetSource[] = ["task_output", "upload", "url"];
+const ASSET_SORTS: readonly AssetSort[] = ["recent", "oldest", "name", "size"];
+
 interface CliErrorDetails {
   error: string;
   type: string;
   status?: number;
   code?: number;
+  /** The server's machine-readable reason (`data.reason`), passed through unchanged. */
+  reason?: string;
   requestId?: string;
   retryAfterSeconds?: number;
   /**
@@ -170,6 +218,70 @@ function retentionDuration(value: string): number {
   }
 }
 
+function assetKind(value: string): AssetKind {
+  if (!(ASSET_KINDS as readonly string[]).includes(value)) {
+    throw new InvalidArgumentError(`must be one of: ${ASSET_KINDS.join(", ")}`);
+  }
+  return value as AssetKind;
+}
+
+function assetSort(value: string): AssetSort {
+  if (!(ASSET_SORTS as readonly string[]).includes(value)) {
+    throw new InvalidArgumentError(`must be one of: ${ASSET_SORTS.join(", ")}`);
+  }
+  return value as AssetSort;
+}
+
+function assetSources(value: string): AssetSource[] {
+  const sources = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const unknown = sources.filter((item) => !(ASSET_SOURCES as readonly string[]).includes(item));
+  if (sources.length === 0 || unknown.length > 0) {
+    throw new InvalidArgumentError(
+      `must be a comma-separated list of: ${ASSET_SOURCES.join(", ")}`,
+    );
+  }
+  return sources as AssetSource[];
+}
+
+function uploadContentType(value: string): UploadContentType {
+  try {
+    return parseUploadContentType(value);
+  } catch (error) {
+    throw new InvalidArgumentError(error instanceof Error ? error.message : "invalid content type");
+  }
+}
+
+/** Exactly one source per save; naming two would make the request ambiguous. */
+function saveSource(options: SaveAssetCommandOptions): "task" | "file" | "url" | "fileId" {
+  const given = (
+    [
+      ["task", options.task],
+      ["file", options.file],
+      ["url", options.url],
+      ["fileId", options.fileId],
+    ] as const
+  ).filter(([, value]) => value !== undefined);
+  if (given.length !== 1) {
+    throw new TypeError(
+      "choose exactly one source: --task <task-id> [--index <n> | --key <key>], --file <path>, --url <url> or --file-id <id>",
+    );
+  }
+  const source = given[0]![0];
+  if (source !== "task" && (options.index !== undefined || options.key !== undefined)) {
+    throw new TypeError("--index and --key pick a task output, so they only go with --task");
+  }
+  if (source !== "file" && options.contentType !== undefined) {
+    throw new TypeError("--content-type only goes with --file");
+  }
+  if (options.index !== undefined && options.key !== undefined) {
+    throw new TypeError("use either --index or --key, not both");
+  }
+  return source;
+}
+
 function clientOptions(program: Command): SpicyClientOptions {
   const options = program.opts<GlobalOptions>();
   return {
@@ -216,6 +328,7 @@ function describeError(error: unknown): CliErrorDetails {
       type: error.name,
       status: error.status,
       ...(error.code === undefined ? {} : { code: error.code }),
+      ...(error.reason === undefined ? {} : { reason: error.reason }),
       ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
       ...(error.retryAfterSeconds === undefined
         ? {}
@@ -526,11 +639,7 @@ export function createCli(dependencies: CliDependencies = {}): Command {
     .action(async (filePath: string, options: { contentType?: CliUploadContentType }) => {
       const contentType = options.contentType ?? inferUploadContentType(filePath);
       outputValue(
-        await createClient(clientOptions(program)).uploadFile(filePath, {
-          /* The published SDK types stop at the eight media types; documents are passed through
-             unchanged at runtime and validated by the server. See DocumentContentType. */
-          contentType: contentType as UploadContentType,
-        }),
+        await createClient(clientOptions(program)).uploadFile(filePath, { contentType }),
         isJson(program),
         io,
       );
@@ -546,6 +655,213 @@ export function createCli(dependencies: CliDependencies = {}): Command {
         isJson(program),
         io,
       );
+    });
+
+  const assets = program
+    .command("assets")
+    .description(
+      "keep files in your private asset library and reference them as spicy://a/<id> in model input",
+    );
+  assets
+    .command("list")
+    .option("--kind <kind>", "image, video, or audio", assetKind)
+    .option("--source <sources>", "comma-separated: task_output, upload, url", assetSources)
+    .option("--search <text>", "case-insensitive part of the asset name")
+    .option("--favorite", "only favorites")
+    .option("--no-favorite", "only assets that are not favorites")
+    .option(
+      "--folder <collection-id>",
+      "only the assets in this folder (folders are made on the web)",
+    )
+    .option("--character <character-id>", "only the images of this character")
+    .option("--sort <order>", "recent (default), oldest, name, or size", assetSort)
+    .option("--limit <count>", "page size (1-100, default 100)", integer)
+    .option("--cursor <cursor>", "opaque nextCursor from the preceding page, with the same --sort")
+    .option("--all", "follow every page instead of returning one")
+    .description("list saved assets, newest first unless --sort says otherwise")
+    .action(async (options: ListAssetsCommandOptions) => {
+      const filters = {
+        ...(options.kind === undefined ? {} : { kind: options.kind }),
+        ...(options.source === undefined ? {} : { source: options.source }),
+        ...(options.search === undefined ? {} : { q: options.search }),
+        ...(options.favorite === undefined ? {} : { favorite: options.favorite }),
+        ...(options.folder === undefined ? {} : { collectionId: options.folder }),
+        ...(options.character === undefined ? {} : { entityId: options.character }),
+        ...(options.sort === undefined ? {} : { sort: options.sort }),
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      };
+      const client = createClient(clientOptions(program));
+      if (options.all) {
+        const items = [];
+        for await (const item of client.assets.listAll(filters)) items.push(item);
+        if (isJson(program)) outputValue({ items }, true, io);
+        else for (const line of describeAssetList({ items })) io.stdout(`${line}\n`);
+        return;
+      }
+      const page = await client.assets.list(filters);
+      if (isJson(program)) outputValue(page, true, io);
+      else for (const line of describeAssetList(page)) io.stdout(`${line}\n`);
+    });
+  assets
+    .command("get")
+    .argument("<asset>", "asset id (ast_...) or its spicy://a/ reference")
+    .description("get one asset with a private preview link valid for at most 20 minutes")
+    .action(async (assetId: string) => {
+      outputValue(
+        await createClient(clientOptions(program)).assets.get(assetId),
+        isJson(program),
+        io,
+      );
+    });
+  assets
+    .command("save")
+    .option("--task <task-id>", "save an output of one of your successful tasks")
+    .option(
+      "--index <n>",
+      "zero-based output position, with --task; first output when omitted",
+      integer,
+    )
+    .option("--key <key>", "output key, with --task, instead of --index")
+    .option("--file <path>", "upload a local file and save it")
+    .option("--url <url>", "save a public http or https file")
+    .option("--file-id <id>", "save a committed upload (fil_... or spicy://f/...)")
+    .option("--name <name>", "up to 80 characters; --file defaults to the file name")
+    .option("--content-type <type>", "override the MIME type, with --file", uploadContentType)
+    .option("--idempotency-key <key>", "stable key to replay this save; generated when omitted")
+    .description("save a file to your asset library and print its spicy://a/ reference")
+    .action(async (options: SaveAssetCommandOptions) => {
+      const source = saveSource(options);
+      const client = createClient(clientOptions(program));
+      const name = options.name === undefined ? {} : { name: options.name };
+      let saved;
+      if (source === "file") {
+        saved = await client.assets.uploadFile(options.file!, {
+          ...name,
+          ...(options.contentType === undefined ? {} : { contentType: options.contentType }),
+        });
+      } else {
+        let input: CreateAssetInput;
+        if (source === "task") {
+          input = {
+            source: "task_output",
+            taskId: options.task!,
+            ...(options.key === undefined ? { index: options.index ?? 0 } : { key: options.key }),
+            ...name,
+          };
+        } else if (source === "url") {
+          input = { source: "url", url: options.url!, ...name };
+        } else {
+          input = { source: "upload", fileId: options.fileId!, ...name };
+        }
+        saved = await client.assets.create(input, {
+          ...(options.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: options.idempotencyKey }),
+        });
+      }
+      if (isJson(program)) outputValue(saved, true, io);
+      else for (const line of describeSavedAsset(saved)) io.stdout(`${line}\n`);
+    });
+  assets
+    .command("rename")
+    .argument("<asset>", "asset id (ast_...) or its spicy://a/ reference")
+    .argument("<name>", "new name, 1-80 characters")
+    .description("rename an asset; its spicy://a/ reference stays the same")
+    .action(async (assetId: string, name: string) => {
+      outputValue(
+        await createClient(clientOptions(program)).assets.update(assetId, { name }),
+        isJson(program),
+        io,
+      );
+    });
+  for (const [command, favorite] of [
+    ["favorite", true],
+    ["unfavorite", false],
+  ] as const) {
+    assets
+      .command(command)
+      .argument("<asset>", "asset id (ast_...) or its spicy://a/ reference")
+      .description(
+        favorite
+          ? "mark an asset as a favorite; in a team library everyone sees the same favorites"
+          : "remove an asset's favorite mark",
+      )
+      .action(async (assetId: string) => {
+        const updated = await createClient(clientOptions(program)).assets.update(assetId, {
+          favorite,
+        });
+        if (isJson(program)) outputValue(updated, true, io);
+        else for (const line of describeFavoriteChange(updated)) io.stdout(`${line}\n`);
+      });
+  }
+  assets
+    .command("delete")
+    .argument("<asset>", "asset id (ast_...) or its spicy://a/ reference")
+    .option("--yes", "confirm the destructive action non-interactively")
+    .description("permanently delete an asset; its spicy://a/ reference stops working")
+    .action(async (assetId: string, options: { yes?: boolean }) => {
+      await requireConfirmation(
+        `Permanently delete asset ${assetId}? Its spicy://a/ reference stops working in new requests, and this cannot be undone.`,
+        Boolean(options.yes),
+        io,
+        "destructive",
+      );
+      const result = await createClient(clientOptions(program)).assets.delete(assetId);
+      outputValue(result, isJson(program), io);
+    });
+  assets
+    .command("usage")
+    .description("show your storage plan, what is stored, and today's count of new assets")
+    .action(async () => {
+      const usage = await createClient(clientOptions(program)).assets.usage();
+      if (isJson(program)) outputValue(usage, true, io);
+      else for (const line of describeAssetUsage(usage)) io.stdout(`${line}\n`);
+    });
+
+  const characters = program
+    .command("characters")
+    .description(
+      "read the characters of your asset library: named sets of images to use as references",
+    );
+  characters
+    .command("list")
+    .option(
+      "--asset <asset>",
+      "only the characters that contain this asset (ast_... or spicy://a/)",
+    )
+    .option("--limit <count>", "page size (1-100, default 50)", integer)
+    .option("--cursor <cursor>", "opaque nextCursor from the preceding page")
+    .option("--all", "follow every page instead of returning one")
+    .description("list characters, newest first, each with its images as spicy://a/ references")
+    .action(async (options: ListCharactersCommandOptions) => {
+      const filters = {
+        ...(options.asset === undefined ? {} : { assetId: options.asset }),
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      };
+      const client = createClient(clientOptions(program));
+      if (options.all) {
+        const items = [];
+        for await (const item of client.assets.characters.listAll(filters)) items.push(item);
+        if (isJson(program)) outputValue({ items }, true, io);
+        else for (const line of describeCharacterList({ items })) io.stdout(`${line}\n`);
+        return;
+      }
+      const page = await client.assets.characters.list(filters);
+      if (isJson(program)) outputValue(page, true, io);
+      else for (const line of describeCharacterList(page)) io.stdout(`${line}\n`);
+    });
+  characters
+    .command("get")
+    .argument("<character>", "character id, from `spicyapi characters list`")
+    .description("get one character with its images in order, ready to use as references")
+    .action(async (characterId: string) => {
+      const character = await createClient(clientOptions(program)).assets.characters.get(
+        characterId,
+      );
+      if (isJson(program)) outputValue(character, true, io);
+      else for (const line of describeCharacter(character)) io.stdout(`${line}\n`);
     });
 
   const webhooks = program
@@ -606,6 +922,11 @@ export async function runCli(
 ): Promise<number> {
   const io = dependencies.io ?? defaultCliIo();
   const program = createCli({ ...dependencies, io });
+  // Remember which command ran, so a hint can depend on it (an asset 403 is not a model 403).
+  let activeCommand: Command | undefined;
+  program.hook("preAction", (_root, actionCommand) => {
+    activeCommand = actionCommand;
+  });
   try {
     await program.parseAsync(argv);
     return 0;
@@ -644,6 +965,14 @@ export async function runCli(
       const next = describeNextStep(
         error instanceof TaskAcceptedButWaitFailedError ? error.cause : error,
         io.env,
+        {
+          assets: activeCommand?.parent?.name() === "assets",
+          characters: activeCommand?.parent?.name() === "characters",
+          folder:
+            activeCommand?.parent?.name() === "assets" &&
+            activeCommand.name() === "list" &&
+            activeCommand.opts()["folder"] !== undefined,
+        },
       );
       if (next) io.stderr(`${next}\n`);
     }

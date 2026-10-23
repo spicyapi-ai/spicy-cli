@@ -1,6 +1,6 @@
 {
   "name": "@spicyapi/cli",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Official command-line client for SpicyAPI",
   "type": "module",
   "license": "MIT",
@@ -10,7 +10,7 @@
   },
   "homepage": "https://spicyapi.ai",
   "bugs": {
-    "url": "https://github.com/spicyapi-ai/spicy-cli/issues"
+    "url": "https://spicyapi.ai/contact"
   },
   "publishConfig": {
     "access": "public"
@@ -41,7 +41,7 @@
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
-    "@spicyapi/sdk": "^0.7.0",
+    "@spicyapi/sdk": "^0.9.0",
     "commander": "15.0.0"
   },
   "devDependencies": {
