@@ -354,7 +354,9 @@ never cancels a task.
 `errorMessage` on failure, `cost` and `settled`, `contentState` and `retention`. Each call returns
 fresh links. Use the same API key that created the task. Some models answer in `output.text` instead
 of a file — audio transcription is the obvious one, an ordinary asynchronous task whose result is
-words — so an empty `output.assets` is not automatically a failure.
+words — so an empty `output.assets` is not automatically a failure. Embedding models return vectors
+in `output.embeddings`, image-to-3D and text-to-3D return a `mesh` asset (a `.glb` file), and vector
+models return `image/svg+xml` images.
 
 `tasks retry` takes `--idempotency-key`, `--yes`, `--wait`, `--poll-interval-ms` and
 `--wait-timeout-ms`. It asks for confirmation but, unlike `tasks create`, does not show a price
@@ -625,7 +627,9 @@ It submits and tracks native asynchronous tasks. It does not stream chat tokens.
 text models are reached through the compatible layers instead — `POST /v1/chat/completions` and
 `POST /v1/responses` (OpenAI), `POST /v1/messages` (Anthropic) and
 `POST /v1beta/models/{model}:generateContent` (Google Gemini), all under `https://api.spicyapi.ai` —
-so keep the official client you already use and point its base URL at SpicyAPI. Use native
+so keep the official client you already use and point its base URL at SpicyAPI. Embedding and
+text-to-speech models also answer at `POST /v1/embeddings` and `POST /v1/audio/speech`, and live
+voice and transcription use the `wss://api.spicyapi.ai/v1/realtime` WebSocket. Use native
 `jobs/stream` when you need quote confirmation and the platform event envelope — see the
 [text and streaming guide](https://docs.spicyapi.ai/docs/text-and-streaming).
 
